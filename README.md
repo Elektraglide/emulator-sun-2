@@ -1,3 +1,5 @@
+[Being converted to be a Tektronix 4404 emulator]
+
 # emulator-sun-2
 Emulator for Sun-2 workstation
 
