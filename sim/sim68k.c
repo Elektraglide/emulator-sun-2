@@ -95,15 +95,15 @@ int g_trace = 0;
 unsigned long g_isn_count;
 
 int trace_cpu_io = 0;
-int trace_cpu_rw;
-int trace_cpu_isn;
+int trace_cpu_rw = 0;
+int trace_cpu_isn = 0;
 int trace_cpu_bin;
 int trace_mmu_bin;
 int trace_mmu;
 int trace_mmu_rw;
 int trace_mem_bin;
-int trace_sc;
-int trace_scsi;
+int trace_sc = 1;
+int trace_scsi = 1;
 int trace_armed;
 int trace_irq;
 
@@ -112,6 +112,90 @@ extern int quiet;
 unsigned int g_int_controller_pending = 0;	/* list of pending interrupts */
 unsigned int g_int_controller_highest_int = 0;	/* Highest pending interrupt */
 
+#ifdef TEK4404
+
+unsigned int tekscsi;
+unsigned int tekscsidelay;
+
+unsigned short tekmap[4096];
+
+enum {STS_RXR=1, STS_TXR=4, STS_TXE=8, STS_OER=16,STS_PER=32,STS_FER=64};
+enum {CMD_ERX=1, CMD_DRX=2, CMD_ETX=4, CMD_DTX=8};
+enum {ISTS_TAI=1, ISTS_RAI=2, ISTS_TBI=16, ISTS_RBI=32, ISTS_IPC=128};
+enum {KEYBOARD_INT=4, TX_INT=16, RX_INT=32};
+int duartbaud[][16] = {
+	{50,110,134,200,300,600,1200,1060,2400,4800,7200,9600,38400, 0,0,0},
+	{75,110,134,150,300,600,1200,2000,2400,4800,1800,9600,19200, 0,0,0}
+};
+
+struct DuartPort {
+	unsigned char mode[2],stat,rx,tx,mode_index;
+	unsigned char rx_wi,rx_ri, rx_queue[16];
+	unsigned char tx_wi,tx_ri, tx_queue[16];
+};
+
+int empty_input(struct DuartPort *port)
+{
+	return port->rx_wi == port->rx_ri;
+}
+
+void push_input(struct DuartPort *port, int scancode)
+{
+	port->rx_queue[port->rx_wi & 15] = scancode;
+	port->rx_wi++;
+}
+
+int pop_input(struct DuartPort *port)
+{
+	int c = 0;
+	
+	if (!empty_input(port))
+	{
+		c =	port->rx_queue[port->rx_ri & 15];
+		port->rx_ri++;
+	}
+	
+	return c;
+}
+
+struct Duart {
+	struct DuartPort ports[2];
+	unsigned char acr,ipcr, istat,imr,ivec;
+};
+
+struct Duart duart;
+
+void tek4404_keydown(int c)
+{
+
+	duart.ports[0].stat |= STS_RXR;
+	duart.istat |= ISTS_RAI;
+	duart.ivec |= RX_INT;
+	push_input(&duart.ports[0], c);
+
+	duart.ports[0].rx = 0x05;
+	
+}
+
+void tek4404_keyup(int c)
+{
+	duart.ports[0].stat |= STS_RXR;
+	duart.istat |= ISTS_RAI;
+	duart.ivec |= RX_INT;
+	push_input(&duart.ports[0], c);
+}
+
+
+
+unsigned char acia[8];
+char aciabuffer[128];
+int acialen = 0;
+int aciabaud[] = {0,50,75,110,134,150,300,600,1200,1800,2400,3600,4800,7200,9600,19200};
+char aciafakeinput[] = "A7400\n";
+int aciafakelen = 0;
+
+unsigned char g_debugram[4096];		// 0x760000
+#endif
 unsigned char g_rom[MAX_ROM+1];					/* ROM */
 unsigned char g_ram[MAX_RAM+1];					/* RAM */
 
@@ -153,11 +237,11 @@ void exit_error(char* fmt, ...)
 
 /* ------------------------------------------------ */
 
-
 unsigned int io_read(int size, unsigned int va, unsigned int pa)
 {
   unsigned int value;
-
+	int port;
+	
   value = 0xffff;
 //  value = 0x0;
 
@@ -167,7 +251,11 @@ unsigned int io_read(int size, unsigned int va, unsigned int pa)
   }
 
   /* for eprom, hardware bypasses mapping with cpu va */
+#ifdef TEK4404
+  if (pa < 0x10  && g_fc == 6) {
+#else
   if (pa < 0x800 || pa >= 0xef0000) {
+#endif
 //  prom:
     pa = va & 0x7fff;
     switch (size) {
@@ -179,6 +267,237 @@ unsigned int io_read(int size, unsigned int va, unsigned int pa)
 
     return value;
   }
+
+#ifdef TEK4404
+	// nothing here
+	if (pa > MAX_RAM && pa < 0x600000) {
+		trace_cpu_rw = trace_cpu_isn = trace_mmu = trace_sc = trace_scsi = 1;
+
+		// used to probe how much memory is installed;  SFC/DFC alternatvely set to userdata,sysdata..
+		pending_buserr();
+
+		return value;
+	}
+
+  if (pa >= 0x600000 && pa < 0x620000) {
+    return sun2_video_read(pa, size);
+  }
+
+  if (pa >= 0x800000 && pa < 0x1000000) {
+
+			printf("tekmap[%d] <= %d\n", ((pa & 0xfffff) >> 12) & 0x1fff, value);
+    return 0;
+  }
+
+  switch (pa & 0xfff000) {
+
+  default:
+		switch (size) {
+		case 1: value = cpu_read_byte(pa); break;
+		case 2: value = cpu_read_word(pa); break;
+		default:
+		case 4:
+			value = cpu_read_long(pa); break;
+		}
+		
+		break;
+  
+	case 0x740000:			// ROM_START
+	case 0x741000:
+	case 0x742000:
+	case 0x743000:
+	case 0x744000:
+	case 0x745000:
+	case 0x746000:
+	case 0x747000:
+	case 0x748000:
+	case 0x749000:
+	case 0x74a000:
+	case 0x74b000:
+	case 0x74c000:
+	case 0x74d000:
+	case 0x74e000:
+	case 0x74f000:
+    pa = va & 0x7fff;
+    switch (size) {
+    case 1: value = READ_BYTE(g_rom, pa); break;
+    case 2: value = READ_WORD(g_rom, pa); break;
+    default:
+    case 4: value = READ_LONG(g_rom, pa); break;
+    }
+  	break;
+	
+	case 0x760000:			// DEBUG_RAM_START
+    pa = va & 0xfff;
+    switch (size) {
+    case 1: value = READ_BYTE(g_debugram, pa); break;
+    case 2: value = READ_WORD(g_debugram, pa); break;
+    default:
+    case 4: value = READ_LONG(g_debugram, pa); break;
+    }
+		break;
+
+// Processor Board I/O
+
+	case 0x780000:			// MMU_START
+  	value = 0;
+  	break;
+	
+	case 0x788000:			// SOUND_START
+  	printf("SOUND(%08x) read %d\n", pa, size);
+  	value = 0;
+  	break;
+	
+  case 0x78a000:			// FPU_START
+  	value = 0;
+  	break;
+
+  case 0x78c000:			// ACIA_START
+  	value = acia[pa & 7];
+  	if ((pa & 7) == 0)	// Data
+  	{
+  		// generate some fake input for monitor
+			value = aciafakeinput[aciafakelen++];
+			if (value == '\n')
+			{
+				// pretend we've dropped the connection
+				acia[2] = 0x18 | 0x60;
+			}
+			if (aciafakelen > 6)
+			{
+				value = 0;
+			}
+  	}
+  	if ((pa & 7) == 2)	// Status
+  	{
+  		value |= 0x08;		// recv empty
+  		value |= 0x10;		// xmit empty
+  		
+  		// to provoke generating a prompt we pretend to be connected
+			//value |= 0x60;		// DCD/DSR high (not connected)
+  	}
+  	break;
+
+// Peripheral Board I/O
+
+  case 0x7b0000:			// DIAG_START
+  	value = 0;
+  	break;
+  	
+  case 0x7b4000:			// DUART_START
+  	// READ
+		port = (pa>>4) & 1;
+  	if ((pa & 15) == 0)		// MR12A
+  	{
+  		if (size == 2)
+  		{
+				value = (duart.ports[port].mode[0] << 8) | duart.ports[port].mode[1];
+  		}
+  		else
+  		{
+				value = duart.ports[port].mode[duart.ports[port].mode_index & 1];
+				duart.ports[port].mode_index++;
+			}
+  	}
+  	if ((pa & 15) == 2)		// CSRA
+  	{
+  		value = duart.ports[port].stat;
+
+  		// fake process transmit
+  		if ((duart.ports[port].stat & (STS_TXR | STS_TXE)))
+  		{
+				duart.istat = port ? ISTS_TBI : ISTS_TAI;
+				
+				if (duart.ports[port].mode[1] & 128)	// loopback
+				{
+					duart.ports[port].stat |= STS_RXR;
+					duart.ports[port].rx = duart.ports[port].tx;
+					duart.ivec |= RX_INT;
+				}
+  		}
+  		
+  	}
+  	if ((pa & 15) == 6)		// Receive Buffer A
+  	{
+  		// this makes self-test fail..
+  		//duart.ports[port].rx = pop_input(&duart.ports[port]);
+  		
+  		duart.ports[port].stat &= ~STS_RXR;
+  		duart.istat &= ~(port ? ISTS_RBI : ISTS_RAI);
+			duart.ivec &= ~(port ? KEYBOARD_INT : RX_INT);
+
+  		value = duart.ports[port].rx;
+  	}
+  	
+  	if ((pa & 31) == 8)		// IPCR_ACR
+  	{
+  		value = duart.ipcr;
+	value = 0x40;
+  		duart.ipcr &= 0xf0;
+  		duart.ivec = 0;
+			duart.istat &= ~ISTS_IPC;
+  	}
+  	if ((pa & 31) == 10)		// ISR_MASK
+  	{
+  		value = duart.istat;
+  	}
+  	if ((pa & 31) == 26)		// IP_OPCR
+  	{
+			value = 0x10;	// IP4 high (RxRDYAI)
+  	}
+  	
+  	printf("DUART(%08x) %d => %02x\n", pa, size, value);
+
+  	break;
+  	
+  case 0x7b6000:			// MOUSE_START
+  	printf("MOUSE(%08x) read %d\n", pa, size);
+  	value = 0;
+  	break;
+  	
+  case 0x7b8000:			// TIMER_START
+  	value = am9513_read(pa, size);
+  	break;
+  	
+  case 0x7ba000:			// CAL_START
+  	printf("CAL(%08x) read %d\n", pa, size);
+  	value = 0;
+  	break;
+  	
+  case 0x7bc000:			// SCSI_BUS_ADDRESS_REGISTER_START
+		printf("scsi_bus_address(%08x) read %d\n", pa, size);
+    break;
+
+  case 0x7be000:			// SCSI_START
+	  printf("scsi(%08x) read %d\n", pa, size);
+
+		// reading 2 16-bit values..
+    if (pa == 0x7be008)
+    {
+    	value = 0;
+    }
+    if (pa == 0x7be00c)
+    {
+    	value = 0;
+    }
+
+    if (pa == 0x7be012)
+    {
+    	switch(tekscsi)
+    	{
+				case 0x00:
+					value = 128;
+					break;
+	    	case 0x01:
+					break;
+				case 0xff:
+					break;
+    	}
+    }
+    break;
+	}
+
+#else
 
   switch (pa & 0xff00) {
   case 0x2000:
@@ -216,6 +535,9 @@ pending_buserr();
     printf("io: read %x -> %x (%d) pc %x\n", pa, value, size, m68k_get_reg(NULL, M68K_REG_PC));
     break;
   }
+  
+#endif
+
 
   if (trace_cpu_io)
     printf("io: read %x -> %x (%d) pc %x\n", pa, value, size, m68k_get_reg(NULL, M68K_REG_PC));
@@ -225,10 +547,302 @@ pending_buserr();
 
 void io_write(int size, unsigned int pa, unsigned int value)
 {
+	int port;
+
   if (trace_cpu_io)
     printf("io: write %x <- %x (%d)\n", pa, value, size);
 
+#ifdef TEK4404
+	// nothing here
+	if (pa > MAX_RAM && pa < 0x600000) {
+		trace_cpu_rw = trace_cpu_isn = trace_mmu = trace_sc = trace_scsi = 1;
+
+		  pending_buserr();
+
+		return;
+	}
+
+  if (pa >= 0x600000 && pa < 0x620000) {
+    sun2_video_write(pa, size, value);
+    return;
+  }
+
+  if (pa >= 0x800000 && pa < 0x1000000) {
+
+			tekmap[((pa & 0xfffff) >> 12) & 0x1fff] = value;
+			printf("tekmap[%d] <= %d\n", ((pa & 0xfffff) >> 12) & 0x1fff, value);
+    return;
+  }
+
+  switch (pa & 0xfff000) {
+
+  default:
+		switch (size) {
+		case 1: cpu_write_byte(pa, value); break;
+		case 2: cpu_write_word(pa, value); break;
+		default:
+		case 4: cpu_write_long(pa, value); break;
+		}
+		break;
+  
+  case 0x740000:
+		printf("LED %c%c%c%c\n", value & 8 ? '*' : '.', value & 4 ? '*' : '.', value & 2 ? '*' : '.', value & 1 ? '*' : '.');
+		if (value == 1)
+			trace_cpu_rw = trace_cpu_isn = 0;
+		break;
+
+	case 0x760000:			// DEBUG_RAM_START
+    switch (size) {
+    case 1: WRITE_BYTE(g_debugram, pa & 0xfff, value); break;
+    case 2: WRITE_WORD(g_debugram, pa & 0xfff, value); break;
+    default:
+    case 4: WRITE_LONG(g_debugram, pa & 0xfff, value); break;
+    }
+		break;
+		
+// Processor Board I/O
+
+	case 0x780000:			// MMU_START
+		printf("MMU(%08x) <= %02x\n", pa, value);
+		
+		//trace_cpu_rw = trace_cpu_isn = trace_mmu = trace_sc = trace_scsi = 1;
+
+		printf("VirtualMem:      %s\n", value & 0x10 ? "ENABLE" : "DISABLE");
+		printf("Write Map Table: %s\n", value & 0x20 ? "ENABLE" : "DISABLE");
+		printf("PTE pid:         %02d\n", value & 7);
+  	break;
+	
+	case 0x782000:			// VIDEO_PAN
+  	value = 0;
+  	break;
+	case 0x784000:			// VIDEO_CONT
+  	value = 0;
+  	break;
+
+	case 0x788000:			// SOUND_START
+		printf("SOUND(%08x) <= %02x\n", pa, value);
+		
+  	value = 0;
+  	break;
+	
+  case 0x78a000:			// FPU_START
+  	value = 0;
+  	break;
+
+  case 0x78c000:			// ACIA_START
+  	if ((pa & 7) == 0)	// DATA
+  	{
+			aciabuffer[acialen++] = value;
+  		if (value == '\n')
+  		{
+  			aciabuffer[acialen] = 0;
+	  		printf("%s", aciabuffer);
+				acialen = 0;
+  		}
+  		break;
+  	}
+  	if ((pa & 7) == 2)	// STAT
+  	{
+  		printf("ACIA STAT: %02x\n", value);
+  		acia[0] = 0;
+  		acialen = 0;
+  	}
+  	if ((pa & 7) == 4)	// CMD
+  	{
+	  	acia[4] = value;
+  		printf("ACIA CMD: %02x  DTR(%d) IRQ(%d)\n", value, value & 1, (value & 2)>>1);
+  	}
+  	if ((pa & 7) == 6)	// CTRL
+  	{
+	  	acia[6] = value;
+  		printf("ACIA CTRL: %02x Baud(%d) Bits(%d)\n", value, aciabaud[value & 15], 8-((value>>5)&3));
+  		
+  	}
+  	break;
+
+// Peripheral Board I/O
+
+  case 0x7b0000:			// DIAG_START
+  	value = 0;
+  	break;
+  	
+  case 0x7b4000:			// DUART_START
+		printf("DUART(%08x) <= %02x\n", pa, value);
+		port = (pa>>4) & 1;
+  	if ((pa & 15) == 0)		// MR12A
+  	{
+  		if (size == 2)
+  		{
+  			printf("ERROR\n");
+  		}
+  		duart.ports[port].mode[duart.ports[port].mode_index & 1] = value;
+  		duart.ports[port].mode_index++;
+  		
+  		if ((duart.ports[port].mode_index & 1) == 0)
+  		{
+  			printf("%d: ",port);
+				printf("%dbit ", 5 + (duart.ports[port].mode[0] & 3));
+				if (duart.ports[port].mode[0] & 128)
+					printf("rts ");
+				if (duart.ports[port].mode[1] & 16)
+					printf("cts ");
+				if (duart.ports[port].mode[1] & 128)
+					printf("loopback");
+				putchar('\n');
+			}
+  	}
+  	if ((pa & 15) == 2)		// CSRA (ClockSelect)
+  	{
+  		int set;
+  		value = value;		// ignore BAUD rate selection
+  		
+  		set = !!(duart.acr & 128);
+  		printf("%d: rcv baud %d xmit baud %d\n", port, duartbaud[set][(value>>4)&15], duartbaud[set][value&15]);
+  	}
+  	if ((pa & 15) == 4)		// CRA	(Command)
+  	{
+  		if (value & CMD_DTX)
+  		{
+  			printf("%d: Disable TX\n",port);
+  			duart.ports[port].stat &= ~STS_TXR;
+  			duart.ports[port].stat &= ~STS_TXE;
+  			if (port == 0)
+  			{
+					duart.ivec &= ~TX_INT;
+					duart.istat &= ~ISTS_TAI;
+				}
+  		}
+  		if (value & CMD_ETX)
+  		{
+  			printf("%d: Enable TX\n",port);
+  			duart.ports[port].stat |= STS_TXR;
+  			duart.ports[port].stat |= STS_TXE;
+  			if (port == 0)
+  			{
+					duart.ivec |= TX_INT;
+					duart.istat |= ISTS_TAI;
+				}
+  		}
+  		if (value & CMD_DRX)
+  		{
+  			printf("%d: Disable RX\n", port);
+  			duart.ports[port].stat &= ~STS_RXR;
+  			duart.ivec &= ~(port ? KEYBOARD_INT : RX_INT);
+  			duart.istat &= ~(port ? ISTS_RBI : ISTS_RAI);
+			}
+  		if (value & CMD_ERX)
+  		{
+  			printf("%d: Enable RX\n", port);
+  			duart.ports[port].stat |= STS_RXR;
+  		}
+  		switch((value>>4)&7)
+  		{
+  			case 1:
+  				duart.ports[port].mode_index = 0;
+  				break;
+  			case 2:
+  				duart.ports[port].stat |= STS_RXR;
+  				break;
+  			case 3:
+  				duart.ports[port].stat |= STS_TXR;
+  				duart.ports[port].stat |= STS_TXE;
+  				break;
+  			case 4:
+  				duart.ports[port].stat &= ~(STS_FER | STS_PER | STS_OER);
+  				break;
+  		}
+  	}
+  	if ((pa & 15) == 6)		// Transmit Buffer A
+  	{
+			duart.ports[port].tx = value;
+			duart.ports[port].stat &= ~(STS_TXE | STS_TXR);
+			duart.istat &= ~(port ? ISTS_TBI : ISTS_TAI);
+			duart.ivec &= ~TX_INT;
+			
+			if (duart.ports[port].mode[1] & 128)	// loopback
+			{
+				duart.ports[port].stat |= STS_RXR;
+				duart.ports[port].rx = value;
+				duart.ivec |= RX_INT;
+			}
+  	}
+  	
+  	if ((pa & 31) == 8)		// IPCR_ACR
+  	{
+  		duart.acr = value;
+  		printf("IP0 IRQ %d\n", !!(value & 1));
+  		printf("IP1 IRQ %d\n", !!(value & 2));
+  		printf("IP2 IRQ %d\n", !!(value & 4));
+  		printf("IP3 IRQ %d\n", !!(value & 8));
+  	}
+  	if ((pa & 31) == 10)		// ISR_MASK
+  	{
+			duart.imr = value;
+  	}
+  	if ((pa & 31) == 28)		// OPBITS_SET
+  	{
+  		// ignore
+  	}
+  	if ((pa & 31) == 30)		// OPBITS_RESET
+  	{
+			if ((value & 8) == 0)
+			{
+				printf("%d: Keyboard reset\n", port);
+				duart.ports[0].stat |= STS_RXR;
+				duart.ports[0].rx = 0xf0; // Reset  What does this mean?
+
+				duart.ports[0].rx_ri = 0;
+				duart.ports[0].rx_wi = 0;
+				duart.ports[0].tx_ri = 0;
+				duart.ports[0].tx_wi = 0;
+				
+//				trace_cpu_rw = trace_cpu_isn = 1;
+			}
+  	}
+  	break;
+  	
+  case 0x7b6000:			// MOUSE_START
+  	value = 0;
+  	break;
+  	
+  case 0x7b8000:			// TIMER_START
+		printf("TIMER(%08x) <= %02x\n", pa, value);
+		am9513_write(pa, value, size);
+  	break;
+  	
+  case 0x7ba000:			// CAL_START
+  	value = 0;
+  	break;
+  	
+  case 0x7bc000:			// SCSI_BUS_ADDRESS_REGISTER_START
+		printf("scsi_bus_address(%08x) <= %02x\n", pa, value);
+    break;
+
+  case 0x7be000:			// SCSI_START
+		printf("scsi(%08x) <= %02x\n", pa, value);
+
+	  trace_cpu_rw = trace_cpu_isn = 1;
+	  
+	  tekscsi = value;
+	  switch(tekscsi)
+	  {
+	  	case 0x00:
+	  		break;
+			case 0x01:
+				break;
+			case 0x0b:
+				break;
+			case 0xff:
+				break;
+	  }
+	  
+    break;
+	}
+
+#else
+
   switch (pa & 0xff00) {
+
   case 0x2000:
   case 0x2002:
   case 0x2004:
@@ -253,13 +867,14 @@ void io_write(int size, unsigned int pa, unsigned int value)
     break;
 
   case 0xe0000:
-    value = e3c400_read(pa, size);
+    value = e3c400_read(pa, size);		// AB: this is a typo, right?  (should be writing)
     break;
-
+	
   default:
     printf("io: write %x <- %x (%d)\n", pa, value, size);
     break;
   }
+#endif
 }
 
 /* ------------------------------------------------ */
@@ -293,7 +908,6 @@ void io_write(int size, unsigned int pa, unsigned int value)
 #else
 #define INTS_ENABLED	(1)
 #endif
-
 
 unsigned int buserr_reg;
 unsigned int sysen_reg;
@@ -703,6 +1317,15 @@ unsigned int cpu_read_obmem(unsigned int address, int size)
 {
   if (0) printf("cpu_read_obmem address %x (%d)\n", address, size);
 
+#ifdef TEK4404
+  if (address >= 0x600000 && address < 0x620000) {
+    return sun2_video_read(address, size);
+  }
+  if (address >= 0x760000 && address < 0x770000) {
+			return READ_WORD(g_debugram, address & 0xfff);
+  }
+#endif
+
   if (address >= 0x700000 && address < 0x780000) {
     return sun2_video_read(address, size);
   }
@@ -711,9 +1334,15 @@ unsigned int cpu_read_obmem(unsigned int address, int size)
     return sun2_kbm_read(address, size);
   }
 
+#ifdef TEK4404
+  if (address >= 0x782000 && address < 0x786000) {
+    return sun2_video_ctl_read(address, size);
+  }
+#else
   if (address >= 0x781800 && address < 0x781900) {
     return sun2_video_ctl_read(address, size);
   }
+#endif
 
   return 0xffffffff;
 }
@@ -722,18 +1351,35 @@ void cpu_write_obmem(unsigned int address, int size, unsigned int value)
 {
   if (0) printf("cpu_write_obmem address %x (%d) <- %x\n", address, size, value);
 
+#ifdef TEK4404
+  if (address >= 0x600000 && address < 0x620000) {
+    sun2_video_write(address, size, value);
+    return;
+  }
+  if (address >= 0x760000 && address < 0x770000) {
+		WRITE_WORD(g_debugram, address & 0xfff, value);
+		return;
+  }
+#else
   if (address >= 0x700000 && address < 0x780000) {
     sun2_video_write(address, size, value);
     return;
   }
+#endif
 
   if (address >= 0x780000 && address < 0x780100) {
     sun2_kbm_write(address, size, value);
   }
 
+#ifdef TEK4404
+  if (address >= 0x782000 && address < 0x786000) {
+    sun2_video_ctl_write(address, size, value);
+  }
+#else
   if (address >= 0x781800 && address < 0x781900) {
     sun2_video_ctl_write(address, size, value);
   }
+#endif
 }
 
 /* Read data from RAM */
@@ -874,6 +1520,24 @@ int cpu_irq_ack(int level)
   if (level != 7 && trace_irq) printf("cpu_irq_ack(%d)\n", level);
   switch(level)
     {
+#ifdef TEK4404
+		case IRQ_9513_TIMER1:
+			return am9513_device_ack(1);
+		case IRQ_DMA:
+			/* DMA */
+			break;
+		case IRQ_SCSI:
+			return scc_device_ack(1);
+		case IRQ_UART:
+			/* UART */
+			break;
+		case IRQ_VSYNC:
+			/* VSYNC */
+			break;
+		case IRQ_DEBUG:
+			/* DEBUG */
+			break;
+#else
 //    case IRQ_NMI_DEVICE:
 //      return nmi_device_ack();
     case IRQ_SC:
@@ -890,6 +1554,7 @@ int cpu_irq_ack(int level)
 //      return sw_int_ack(2);
     case IRQ_SW_INT3:
       return e3c400_device_ack();
+#endif
     }
   return M68K_INT_ACK_SPURIOUS;
 }
@@ -957,7 +1622,20 @@ void io_update(void)
 {
 
 /* here, do your time-consuming job */
+	
+	// tek scsi
+	if (tekscsi == 0xff)
+	{
+		tekscsi = 0;
+		tekscsidelay = 5000;
+	}
 
+	// wait for 'a bit' before reporting we're done?
+	if(--tekscsidelay == 0)
+	{
+		int_controller_set(IRQ_SCSI);
+	}
+	
   am9513_update();
   mm58167_update();
   scc_update();
@@ -966,7 +1644,8 @@ void io_update(void)
   if (sdl_poll_delay++ == 10000) {
     sdl_poll_delay = 0;
     sdl_poll();
-  }
+	}
+    
 }
 
 void io_init(void)
@@ -1028,8 +1707,13 @@ unsigned int m68k_read_disassembler_16(unsigned int address)
   }
 
   /* hack */
+#ifdef TEK4404
+  if ((address & 0x00ff0000) == 0x00740000)
+    return READ_WORD(g_rom, address & 0xffff);
+#else
   if ((address & 0x00ff0000) == 0x00ef0000)
     return READ_WORD(g_rom, address & 0xffff);
+#endif
 
   return READ_WORD(g_ram, address);
 //  return cpu_read_word(address);
@@ -1046,8 +1730,13 @@ unsigned int m68k_read_disassembler_32(unsigned int address)
   }
 
   /* hack */
+#ifdef TEK4404
+  if ((address & 0x00ff0000) == 0x00740000)
+    return READ_LONG(g_rom, address & 0xffff);
+#else
   if ((address & 0x00ff0000) == 0x00ef0000)
     return READ_LONG(g_rom, address & 0xffff);
+#endif
 
   return READ_LONG(g_ram, address);
 //  return cpu_read_long(address);
@@ -1083,11 +1772,13 @@ unsigned int cpu_map_address(unsigned int address, unsigned int fc, int m, unsig
   if (fc == 3)
     return address;
 
-  if ((sysen_reg & SUN2_SYSENABLE_EN_BOOTN) == 0 && fc == 6) {
+	// AB:  I think this is sort of like U171 flipflop on 4404 but we need fc==5 or fc==6
+	
+  if ((sysen_reg & SUN2_SYSENABLE_EN_BOOTN) == 0 && fc >= 5) {
     /* boot */
     //printf("map: %x -> %x (boot)\n", address, address);
     *mtype = PGTYPE_OBIO;
-    return 0x0;
+    return address;
   }
 
   /* normal */
@@ -1171,7 +1862,11 @@ pmeg_number = ((pmeg_number << 1) & 0xfe) | (pmeg_number & 0x80 ? 0x01 : 0x00);
 
   /* prom is magic - it uses part of va */
   if (*mtype == PGTYPE_OBIO && pa == 0) {
-    pa = 0xef0000 | (address & 0x00f800);
+#ifdef TEK4404
+ 	pa = 0x740000;
+#else
+   pa = 0xef0000 | (address & 0x00f800);
+#endif
   }
 
   pa |= offset;
@@ -1195,7 +1890,11 @@ unsigned int cpu_read(int size, unsigned int address)
   unsigned int pa, value, pte;
 
   // check for page crossing on 32bit read
+#ifdef TEK4404
+  if (((address & 0xfff) + size-1) > 0xfff) {		// 4096 PAGSIZ
+#else
   if (((address & 0x7ff) + size-1) > 0x7ff) {
+#endif
     if (size == 4) {
       unsigned v1, v2;
 
@@ -1335,11 +2034,20 @@ void cpu_write(int size, unsigned int address, unsigned int value)
 //    if (address > 0xe00000 || pa > 0xe00000)
 //      printf("cpu_write; OBMEM va %x pa %x size %d <- %x (pte %x)\n", address, pa, size, value, pte);
 
+#ifdef TEK4404
+    if (pa >= 0x600000)
+      cpu_write_obmem(pa, size, value);
+#else
     if (pa >= 0x700000)
       cpu_write_obmem(pa, size, value);
+#endif
     else {
       // check for 32bit writes crossing a page
-      if (((address & 0x7ff) + size-1) > 0x7ff) {
+#ifdef TEK4404
+  if (((address & 0xfff) + size-1) > 0xfff) {		// 4096 PAGSIZ
+#else
+	if (((address & 0x7ff) + size-1) > 0x7ff) {
+#endif
 	if (size == 4) {
 	  cpu_write(2, address,   value >> 16);
 	  if (g_buserr == 0) {
@@ -1701,8 +2409,13 @@ void sim68k(void)
   int quanta;
 
   // put in values for the stack and PC vectors
+#ifdef TEK4404
+  WRITE_LONG(g_ram, 0, 0x740000);   // SP
+  WRITE_LONG(g_ram, 4, 0x740000);   // PC
+#else
   WRITE_LONG(g_ram, 0, 0xfe0000);   // SP
   WRITE_LONG(g_ram, 4, 0xfe0000);   // PC
+#endif
 
   /*
     Install a handler for various termination events so that we have the
@@ -1730,6 +2443,12 @@ g_trace = 1;
   io_init();
 
   trace_cpu_bin = trace_mmu_bin = trace_mem_bin = 0;
+
+
+	// need interrupts for SCSI and memory tests
+	sysen_reg |= SUN2_SYSENABLE_EN_INT;
+
+
 
   while(1)
     {

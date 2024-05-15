@@ -308,7 +308,7 @@ unsigned int scc_read(unsigned int pa, int size)
     break;
   }
 
-  if (0) printf("scc: read pa=%x -> %x (%d)\n", pa, value, size);
+  if (1) printf("scc: read pa=%x -> %x (%d)\n", pa, value, size);
 
   return value;
 }
@@ -318,7 +318,7 @@ void scc_write(unsigned int pa, unsigned int value, int size)
   unsigned int offset = pa & 0xf;
   int w;
 
-  if (0) printf("scc: write pa=%x <- %x (%d)\n", pa, value, size);
+  if (1) printf("scc: write pa=%x <- %x (%d)\n", pa, value, size);
 
   w = 0;
   if ((pa & 0x00ffff00) == 0x780000)

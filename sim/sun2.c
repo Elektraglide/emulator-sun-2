@@ -33,6 +33,9 @@
 
 #include "sim.h"
 
+extern void tek4404_keydown(int code);
+extern void tek4404_keyup(int code);
+
 #define debug 0
 
 static unsigned char *fbmem;
@@ -137,15 +140,15 @@ void sdl_init(void)
 {
     int flags;
 
-#if 0
-    cols = 1152;
-    rows = 900;
-#else
+#ifdef TEK4404
     cols = 1024;
     rows = 1024;
+#else
+    cols = 1152;
+    rows = 900;
 #endif
 
-    if (0) printf("Initialize display %dx%d\n", cols, rows);
+    if (1) printf("Initialize display %dx%d\n", cols, rows);
 
     //flags = SDL_INIT_VIDEO | SDL_INIT_NOPARACHUTE;
     // Init parachute is the default in SDL2 and no longer needed
@@ -180,7 +183,11 @@ void sdl_init(void)
 	return;
     }
 
+#ifdef TEK4404
+    SDL_SetWindowTitle(screen,"Tektronix 4404");
+#else
     SDL_SetWindowTitle(screen,"Sun2");
+#endif
 }
 
 //void sun2_sdl_key(int sdl_code, int modifiers, unsigned int unicode, int down);
@@ -201,14 +208,23 @@ void sdl_poll(void)
 	      break;
 
 	    case SDL_KEYDOWN:
+#ifdef TEK4404
+				tek4404_keydown(event.key.keysym.scancode);
+#else
 	      sun2_sdl_key(event.key.keysym.sym, event.key.keysym.mod, event.key.keysym.scancode, 1);
 	      //sun2_sdl_key(ev->key.keysym.sym, ev->key.keysym.mod, ev->key.keysym.unicode, 1);
+#endif
 	      break;
 
 	    case SDL_KEYUP:
+#ifdef TEK4404
+				tek4404_keyup(event.key.keysym.scancode);
+#else
 	      sun2_sdl_key(event.key.keysym.sym, event.key.keysym.mod, event.key.keysym.scancode, 0);
 	      //sun2_sdl_key(ev->key.keysym.sym, ev->key.keysym.mod, ev->key.keysym.unicode, 0);
+#endif
 	      break;
+
 	    case SDL_QUIT:
 	//      sdl_system_shutdown_request();
 	      break;

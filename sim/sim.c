@@ -118,7 +118,13 @@ read_eprom(void)
 		perror(eprom_filename);
 		exit(1);
 	}
+	
+#ifdef TEK4404
+	read_binary(fd, 0x740000);
+#else
 	read_binary(fd, 0x00fe0000);
+#endif
+
 	close(fd);
 	return 0;
 }
@@ -323,8 +329,11 @@ int main(int argc, char **argv)
 	tape_arg == NULL)
       usage();
 
+#ifdef TEK4404
+    setup_eeprom("boot.bin");
+#else
     setup_eeprom(prom_arg);
-
+#endif
     if (setup_disk(disk_arg))
       exit(1);
 

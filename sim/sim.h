@@ -5,6 +5,23 @@
  */
 
 /* IRQ connections */
+#ifdef TEK4404
+// see page 2.1-57
+#define IRQ_DEBUG				7
+#define IRQ_VSYNC				6
+#define IRQ_UART				5
+#define IRQ_SPARE				4
+#define IRQ_SCC         3
+#define IRQ_SC          3
+#define IRQ_SCSI        3
+#define IRQ_DMA					2
+#define IRQ_9513_TIMER1	1
+#define IRQ_9513_TIMER2 1
+
+#define IRQ_SW_INT3     3
+#define IRQ_SW_INT2     2
+#define IRQ_SW_INT1     1
+#else
 #define IRQ_9513_TIMER1	7
 #define IRQ_SCC         6
 #define IRQ_9513_TIMER2 5
@@ -12,10 +29,17 @@
 #define IRQ_SW_INT2     2
 #define IRQ_SC          2
 #define IRQ_SW_INT1     1
+#endif
 
 /* ROM and RAM sizes */
 #define MAX_ROM 32768       // 32k ROM
+#ifdef TEK4404
+//#define MAX_RAM 0x1fffff    // 2MB of RAM
+#define MAX_RAM 0x5fffff    // 6MB of RAM to avoid handling buserr trap during memory size check
+
+#else
 #define MAX_RAM 0xffffff    // 16MB of RAM
+#endif
 
 void abortf(const char *fmt, ...);
 void enable_trace(int);
